@@ -123,6 +123,10 @@ class GTLayer(nn.Module):
             edges, values = mat.indices(), mat.values()
             # edges, values = torch_sparse.spspmm(a_edge, a_value, b_edge, b_value, num_nodes, num_nodes, num_nodes)
             H.append((edges, values))
+        # H: List of composed adjacency matrices (one per channel)
+        #   H[channel] = (edges, values) representing the meta-path graph
+        # W: List of attention weights (one per GTConv)
+        #   W[conv] = softmax(weight) showing edge type preferences
         return H, W
 
 class GTConv(nn.Module):

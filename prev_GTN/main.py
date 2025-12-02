@@ -1,3 +1,6 @@
+import os
+import logging
+from datetime import datetime
 import torch
 import numpy as np
 import torch.nn as nn
@@ -6,7 +9,39 @@ from model import GTN
 import pdb
 import pickle
 import argparse
-from utils import f1_score
+from utils import f1_score, extract_attention_weights, save_attention_weights
+
+
+def setup_logger(output_path, timestamp):
+    """Setup logger to write to both console and file."""
+    log_dir = os.path.join(output_path, timestamp)
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, 'training.log')
+
+    # Create logger
+    logger = logging.getLogger('GTN')
+    logger.setLevel(logging.INFO)
+
+    # Clear existing handlers
+    logger.handlers = []
+
+    # File handler
+    fh = logging.FileHandler(log_file)
+    fh.setLevel(logging.INFO)
+
+    # Console handler
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+
+    # Formatter
+    formatter = logging.Formatter('%(message)s')
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
+    return logger, log_dir
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -30,9 +65,13 @@ if __name__ == '__main__':
                         help='adaptive learning rate')
     parser.add_argument('--data_path', type=str, default='../data',
                         help='path to data directory')
+    parser.add_argument('--output_path', type=str, default='./output',
+                        help='path to output directory')
 
     args = parser.parse_args()
-    print(args)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    logger, run_output_dir = setup_logger(args.output_path, timestamp)
+    logger.info(args)
     epochs = args.epoch
     node_dim = args.node_dim
     num_channels = args.num_channels
@@ -96,12 +135,12 @@ if __name__ == '__main__':
             for param_group in optimizer.param_groups:
                 if param_group['lr'] > 0.005:
                     param_group['lr'] = param_group['lr'] * 0.9
-            print('Epoch:  ',i+1)
+            logger.info('Epoch:  {}'.format(i+1))
             model.zero_grad()
             model.train()
             loss,y_train,Ws = model(A, node_features, train_node, train_target)
             train_f1 = torch.mean(f1_score(torch.argmax(y_train.detach(),dim=1), train_target, num_classes=num_classes)).cpu().numpy()
-            print('Train - Loss: {}, Macro_F1: {}'.format(loss.detach().cpu().numpy(), train_f1))
+            logger.info('Train - Loss: {}, Macro_F1: {}'.format(loss.detach().cpu().numpy(), train_f1))
             loss.backward()
             optimizer.step()
             model.eval()
@@ -109,10 +148,10 @@ if __name__ == '__main__':
             with torch.no_grad():
                 val_loss, y_valid,_ = model.forward(A, node_features, valid_node, valid_target)
                 val_f1 = torch.mean(f1_score(torch.argmax(y_valid,dim=1), valid_target, num_classes=num_classes)).cpu().numpy()
-                print('Valid - Loss: {}, Macro_F1: {}'.format(val_loss.detach().cpu().numpy(), val_f1))
+                logger.info('Valid - Loss: {}, Macro_F1: {}'.format(val_loss.detach().cpu().numpy(), val_f1))
                 test_loss, y_test,W = model.forward(A, node_features, test_node, test_target)
                 test_f1 = torch.mean(f1_score(torch.argmax(y_test,dim=1), test_target, num_classes=num_classes)).cpu().numpy()
-                print('Test - Loss: {}, Macro_F1: {}\n'.format(test_loss.detach().cpu().numpy(), test_f1))
+                logger.info('Test - Loss: {}, Macro_F1: {}\n'.format(test_loss.detach().cpu().numpy(), test_f1))
             if val_f1 > best_val_f1:
                 best_val_loss = val_loss.detach().cpu().numpy()
                 best_test_loss = test_loss.detach().cpu().numpy()
@@ -120,8 +159,16 @@ if __name__ == '__main__':
                 best_train_f1 = train_f1
                 best_val_f1 = val_f1
                 best_test_f1 = test_f1 
-        print('---------------Best Results--------------------')
-        print('Train - Loss: {}, Macro_F1: {}'.format(best_train_loss, best_train_f1))
-        print('Valid - Loss: {}, Macro_F1: {}'.format(best_val_loss, best_val_f1))
-        print('Test - Loss: {}, Macro_F1: {}'.format(best_test_loss, best_test_f1))
+        logger.info('---------------Best Results--------------------')
+        logger.info('Train - Loss: {}, Macro_F1: {}'.format(best_train_loss, best_train_f1))
+        logger.info('Valid - Loss: {}, Macro_F1: {}'.format(best_val_loss, best_val_f1))
+        logger.info('Test - Loss: {}, Macro_F1: {}'.format(best_test_loss, best_test_f1))
         final_f1 += best_test_f1
+
+    # Save attention weights
+    attn_data = extract_attention_weights(model, num_layers)
+    attn_save_path = os.path.join(run_output_dir, f'attention_weights_{args.dataset}.npz')
+    save_attention_weights(attn_data, attn_save_path)
+    logger.info(f'Attention weights saved to {attn_save_path}')
+
+    logger.info(f'Run completed. All outputs saved to {run_output_dir}')
