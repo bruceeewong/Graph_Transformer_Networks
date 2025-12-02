@@ -10,6 +10,7 @@ from torch_geometric.utils import degree, add_self_loops
 import torch.nn.functional as F
 from torch.distributions.uniform import Uniform
 import time
+import matplotlib.pyplot as plt
 
 
 def accuracy(pred, target):
@@ -299,3 +300,224 @@ def generate_non_local_graph(args, feat_trans, H, A, num_edge, num_nodes):
     #     edge_value = deg_inv_sqrt[deg_col] * edge_value
     #     g = (edge_index, edge_value)
     #     A[-1] = g
+
+
+def get_edge_type_names(dataset):
+    """
+    Get edge type names for a dataset.
+
+    The edge type indices correspond to the order in edges.pkl, plus an
+    identity matrix added as the last edge type.
+
+    Args:
+        dataset: Dataset name ('DBLP', 'ACM', 'IMDB')
+
+    Returns:
+        List of edge type names
+
+    Note:
+        - ACM: Confirmed from Data_Preprocessing.ipynb cell 24:
+          edges = [A_pa, A_ap, A_ps, A_sp]
+        - DBLP/IMDB: Assumed based on typical schema, NOT confirmed from preprocessing code.
+          Please verify with your data preprocessing script.
+        - The identity matrix (I) is added by main.py as the last edge type.
+    """
+    edge_type_names = {
+        'DBLP': ['PA', 'AP', 'PC', 'CP', 'I'],      # Assumed: Paper-Author, Author-Paper, Paper-Conf, Conf-Paper, Identity
+        'ACM': ['PA', 'AP', 'PS', 'SP', 'I'],       # Confirmed: Paper-Author, Author-Paper, Paper-Subject, Subject-Paper, Identity
+        'IMDB': ['MD', 'DM', 'MA', 'AM', 'I'],      # Assumed: Movie-Director, Director-Movie, Movie-Actor, Actor-Movie, Identity
+    }
+    return edge_type_names.get(dataset, None)
+
+
+def extract_attention_weights(model, num_layers):
+    """
+    Extract attention weights from GTN model.
+
+    Args:
+        model: Trained GTN model
+        num_layers: Number of GT layers
+
+    Returns:
+        dict with keys:
+            - 'weights': list of numpy arrays, one per GTConv [num_channels, num_edge_types]
+            - 'layer_names': list of layer names
+            - 'num_layers': number of layers
+            - 'num_channels': number of channels
+            - 'num_edge_types': number of edge types
+
+    Note:
+        Edge type indices correspond to the order in edges.pkl:
+        - DBLP: [PA, AP, PC, CP, I] (Paper-Author, Author-Paper, Paper-Conf, Conf-Paper, Identity)
+        - ACM:  [PA, AP, PS, SP, I] (Paper-Author, Author-Paper, Paper-Subject, Subject-Paper, Identity)
+        - IMDB: [MD, DM, MA, AM, I] (Movie-Director, Director-Movie, Movie-Actor, Actor-Movie, Identity)
+        The Identity (I) matrix is added by main.py as the last edge type.
+    """
+    weights = []
+    layer_names = []
+    with torch.no_grad():
+        for l in range(num_layers):
+            layer = model.layers[l]
+            # First layer has two GTConvs
+            if l == 0:
+                W1 = F.softmax(layer.conv1.weight, dim=1).cpu().numpy()
+                W2 = F.softmax(layer.conv2.weight, dim=1).cpu().numpy()
+                weights.append(W1)
+                weights.append(W2)
+                layer_names.append('Q1')
+                layer_names.append('Q2')
+            else:
+                W = F.softmax(layer.conv1.weight, dim=1).cpu().numpy()
+                weights.append(W)
+                layer_names.append(f'Q{len(weights)}')
+
+    return {
+        'weights': weights,
+        'layer_names': layer_names,
+        'num_layers': num_layers,
+        'num_channels': weights[0].shape[0],
+        'num_edge_types': weights[0].shape[1]
+    }
+
+
+def save_attention_weights(attn_data, save_path):
+    """
+    Save attention weights to a numpy file.
+
+    Args:
+        attn_data: dict from extract_attention_weights()
+        save_path: path to save the .npz file
+    """
+    np.savez(save_path,
+             weights=np.array(attn_data['weights']),
+             layer_names=np.array(attn_data['layer_names']),
+             num_layers=attn_data['num_layers'],
+             num_channels=attn_data['num_channels'],
+             num_edge_types=attn_data['num_edge_types'])
+
+
+def load_attention_weights(load_path):
+    """
+    Load attention weights from a numpy file.
+
+    Args:
+        load_path: path to the .npz file
+
+    Returns:
+        dict with same structure as extract_attention_weights()
+    """
+    data = np.load(load_path, allow_pickle=True)
+    return {
+        'weights': list(data['weights']),
+        'layer_names': list(data['layer_names']),
+        'num_layers': int(data['num_layers']),
+        'num_channels': int(data['num_channels']),
+        'num_edge_types': int(data['num_edge_types'])
+    }
+
+
+def plot_attention_weights(attn_data, edge_type_names=None, save_path=None, channel=0):
+    """
+    Plot attention weights as vertical bars, one column per layer.
+
+    Each column shows the attention scores for each edge type at that layer,
+    with darker colors indicating higher attention weights.
+
+    Args:
+        attn_data: dict from extract_attention_weights() or load_attention_weights()
+        edge_type_names: List of edge type names (optional)
+        save_path: Path to save the figure (optional)
+        channel: Which channel to visualize (default: 0)
+    """
+    weights = attn_data['weights']
+    layer_names = attn_data['layer_names']
+    num_cols = len(weights)
+    num_edge_types = attn_data['num_edge_types']
+
+    # Create edge type labels
+    if edge_type_names is None:
+        edge_type_names = [f'E{i}' for i in range(num_edge_types)]
+
+    # Create figure with GridSpec to properly allocate space for colorbar
+    fig = plt.figure(figsize=(1.2 * num_cols + 1.2, 4))
+
+    # Create grid: num_cols for heatmaps + 1 narrow column for colorbar
+    gs = fig.add_gridspec(1, num_cols + 1, width_ratios=[1]*num_cols + [0.15], wspace=0.1)
+
+    axes = [fig.add_subplot(gs[0, i]) for i in range(num_cols)]
+    cax = fig.add_subplot(gs[0, -1])  # Colorbar axis
+
+    for idx, W in enumerate(weights):
+        ax = axes[idx]
+
+        # Get attention weights for the specified channel
+        # W shape: [num_channels, num_edge_types]
+        attn = W[channel, :]  # Shape: [num_edge_types]
+
+        # Create a 2D array for imshow (edge_types x 1)
+        attn_2d = attn.reshape(-1, 1)
+
+        # Plot as vertical heatmap
+        im = ax.imshow(attn_2d, cmap='Blues', vmin=0, vmax=1, aspect='auto')
+
+        # Set y-axis labels (edge types)
+        ax.set_yticks(range(num_edge_types))
+        ax.set_yticklabels(edge_type_names)
+
+        # Remove x-axis ticks
+        ax.set_xticks([])
+
+        # Set title (layer index)
+        ax.set_xlabel(layer_names[idx], fontsize=10)
+
+        # Only show y-axis labels on the leftmost plot
+        if idx > 0:
+            ax.set_yticklabels([])
+
+    # Add colorbar in dedicated axis
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label('Attention Weight', fontsize=9)
+
+    plt.suptitle(f'GTN Attention Weights (Channel {channel})', fontsize=11, y=0.98)
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f'Figure saved to {save_path}')
+        plt.close()
+    else:
+        plt.show()
+
+
+def print_attention_weights(attn_data, edge_type_names=None):
+    """
+    Print attention weights in text format.
+
+    Args:
+        attn_data: dict from extract_attention_weights() or load_attention_weights()
+        edge_type_names: List of edge type names (optional)
+    """
+    weights = attn_data['weights']
+    layer_names = attn_data['layer_names']
+    num_channels = attn_data['num_channels']
+    num_edge_types = attn_data['num_edge_types']
+
+    print("\n" + "="*60)
+    print("GTN Attention Weights (Meta-Path Coefficients)")
+    print("="*60)
+
+    for idx, W in enumerate(weights):
+        print(f"\n{layer_names[idx]} (Hop {idx + 1}):")
+        print("-" * 40)
+
+        if edge_type_names:
+            header = "Channel | " + " | ".join([f"{e[:8]:>8}" for e in edge_type_names])
+        else:
+            header = "Channel | " + " | ".join([f"Edge{i:>4}" for i in range(num_edge_types)])
+        print(header)
+        print("-" * len(header))
+
+        for ch in range(num_channels):
+            row = f"  Ch{ch}   | " + " | ".join([f"{W[ch, e]:>8.4f}" for e in range(num_edge_types)])
+            print(row)
+
+    print("\n" + "="*60)

@@ -9,8 +9,6 @@ from torch_geometric.utils import softmax
 from utils import _norm, generate_non_local_graph
 
 
-device = f'cuda' if torch.cuda.is_available() else 'cpu'
-
 class FastGTNs(nn.Module):
     def __init__(self, num_edge_type, w_in, num_class, num_nodes, args=None):
         super(FastGTNs, self).__init__()

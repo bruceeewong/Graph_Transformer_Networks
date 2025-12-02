@@ -28,6 +28,8 @@ if __name__ == '__main__':
                         help='normalization')
     parser.add_argument('--adaptive_lr', type=str, default='false',
                         help='adaptive learning rate')
+    parser.add_argument('--data_path', type=str, default='../data',
+                        help='path to data directory')
 
     args = parser.parse_args()
     print(args)
@@ -40,11 +42,11 @@ if __name__ == '__main__':
     norm = args.norm
     adaptive_lr = args.adaptive_lr
 
-    with open('data/'+args.dataset+'/node_features.pkl','rb') as f:
+    with open('%s/%s/node_features.pkl' % (args.data_path, args.dataset),'rb') as f:
         node_features = pickle.load(f)
-    with open('data/'+args.dataset+'/edges.pkl','rb') as f:
+    with open('%s/%s/edges.pkl' % (args.data_path, args.dataset),'rb') as f:
         edges = pickle.load(f)
-    with open('data/'+args.dataset+'/labels.pkl','rb') as f:
+    with open('%s/%s/labels.pkl' % (args.data_path, args.dataset),'rb') as f:
         labels = pickle.load(f)
     num_nodes = edges[0].shape[0]
 

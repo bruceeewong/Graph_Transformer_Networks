@@ -103,6 +103,7 @@ class GTLayer(nn.Module):
     
     def forward(self, A, num_nodes, H_=None, eval=False):
         if self.first == True:
+            # This calls forward() internally
             result_A = self.conv1(A, num_nodes, eval=eval)
             result_B = self.conv2(A, num_nodes, eval=eval)                
             W = [(F.softmax(self.conv1.weight, dim=1)),(F.softmax(self.conv2.weight, dim=1))]
@@ -114,8 +115,10 @@ class GTLayer(nn.Module):
         for i in range(len(result_A)):
             a_edge, a_value = result_A[i]
             b_edge, b_value = result_B[i]
+            # Convert to sparse tensors
             mat_a = torch.sparse_coo_tensor(a_edge, a_value, (num_nodes, num_nodes)).to(a_edge.device)
             mat_b = torch.sparse_coo_tensor(b_edge, b_value, (num_nodes, num_nodes)).to(a_edge.device)
+            # Matrix multiply = path composition
             mat = torch.sparse.mm(mat_a, mat_b).coalesce()
             edges, values = mat.indices(), mat.values()
             # edges, values = torch_sparse.spspmm(a_edge, a_value, b_edge, b_value, num_nodes, num_nodes, num_nodes)
@@ -123,6 +126,11 @@ class GTLayer(nn.Module):
         return H, W
 
 class GTConv(nn.Module):
+    """
+    GTConv creates a weighted combination of all edge types for each channel.
+    - A: List of adjacency matrices, one per edge type. Each is (edge_index, edge_value) tuple
+    - num_nodes: Number of nodes in graph
+    """
     
     def __init__(self, in_channels, out_channels, num_nodes):
         super(GTConv, self).__init__()
@@ -141,18 +149,31 @@ class GTConv(nn.Module):
             nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, A, num_nodes, eval=eval):
-        filter = F.softmax(self.weight, dim=1)
+        filter = F.softmax(self.weight, dim=1) # shape: [num_channels, num_edge_types]
         num_channels = filter.shape[0]
         results = []
+        # For each channel, combine all edge types
         for i in range(num_channels):
+            # Example of edge_index and edge_value
+            # edge_index = [[0, 0, 1, 2],    # source nodes
+            #   [1, 2, 0, 3]]    # target nodes
+            # edge_value = [1.0, 1.0, 1.0, 1.0] # the weight/strength of each edge in the sparse adjacency matrix.
+            # A is an adjacency matrix consisting of multiple edge t, stored in COO format (edge_index, edge_value)
             for j, (edge_index,edge_value) in enumerate(A):
                 if j == 0:
                     total_edge_index = edge_index
-                    total_edge_value = edge_value*filter[i][j]
+                    # Scale by attention weight
+                    total_edge_value = edge_value * filter[i][j]
                 else:
-                    total_edge_index = torch.cat((total_edge_index, edge_index), dim=1)
-                    total_edge_value = torch.cat((total_edge_value, edge_value*filter[i][j]))
+                    # Concatenate all edge types together
+                    # it joins tensors along a specified dimension
+                    total_edge_index = torch.cat((total_edge_index, edge_index), dim=1) # columns
+                    total_edge_value = torch.cat((total_edge_value, edge_value*filter[i][j])) # rows
             
+            # coalesce merges duplicate edges (same source-target pair from different edge types) 
+            #   by summing their weighted values.
             index, value = torch_sparse.coalesce(total_edge_index.detach(), total_edge_value, m=num_nodes, n=num_nodes, op='add')
             results.append((index, value))
+
+        # Final weighted adjacency for channels
         return results
