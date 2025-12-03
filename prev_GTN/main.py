@@ -69,9 +69,14 @@ if __name__ == '__main__':
                         help='path to output directory')
 
     args = parser.parse_args()
+
+    # Setup device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     logger, run_output_dir = setup_logger(args.output_path, timestamp)
     logger.info(args)
+    logger.info(f'Using device: {device}')
     epochs = args.epoch
     node_dim = args.node_dim
     num_channels = args.num_channels
@@ -95,14 +100,15 @@ if __name__ == '__main__':
         else:
             A = torch.cat([A,torch.from_numpy(edge.todense()).type(torch.FloatTensor).unsqueeze(-1)], dim=-1)
     A = torch.cat([A,torch.eye(num_nodes).type(torch.FloatTensor).unsqueeze(-1)], dim=-1)
-    
-    node_features = torch.from_numpy(node_features).type(torch.FloatTensor)
-    train_node = torch.from_numpy(np.array(labels[0])[:,0]).type(torch.LongTensor)
-    train_target = torch.from_numpy(np.array(labels[0])[:,1]).type(torch.LongTensor)
-    valid_node = torch.from_numpy(np.array(labels[1])[:,0]).type(torch.LongTensor)
-    valid_target = torch.from_numpy(np.array(labels[1])[:,1]).type(torch.LongTensor)
-    test_node = torch.from_numpy(np.array(labels[2])[:,0]).type(torch.LongTensor)
-    test_target = torch.from_numpy(np.array(labels[2])[:,1]).type(torch.LongTensor)
+    A = A.to(device)
+
+    node_features = torch.from_numpy(node_features).type(torch.FloatTensor).to(device)
+    train_node = torch.from_numpy(np.array(labels[0])[:,0]).type(torch.LongTensor).to(device)
+    train_target = torch.from_numpy(np.array(labels[0])[:,1]).type(torch.LongTensor).to(device)
+    valid_node = torch.from_numpy(np.array(labels[1])[:,0]).type(torch.LongTensor).to(device)
+    valid_target = torch.from_numpy(np.array(labels[1])[:,1]).type(torch.LongTensor).to(device)
+    test_node = torch.from_numpy(np.array(labels[2])[:,0]).type(torch.LongTensor).to(device)
+    test_target = torch.from_numpy(np.array(labels[2])[:,1]).type(torch.LongTensor).to(device)
     
     num_classes = torch.max(train_target).item()+1
     final_f1 = 0
@@ -114,6 +120,7 @@ if __name__ == '__main__':
                             num_class=num_classes,
                             num_layers=num_layers,
                             norm=norm)
+        model = model.to(device)
         if adaptive_lr == 'false':
             optimizer = torch.optim.Adam(model.parameters(), lr=0.005, weight_decay=0.001)
         else:
