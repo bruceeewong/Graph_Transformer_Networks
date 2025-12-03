@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import math
 from matplotlib import pyplot as plt
 import pdb
-from torch_geometric.utils import dense_to_sparse, f1_score
+from torch_geometric.utils import dense_to_sparse
 from gcn import GCNConv
 from torch_scatter import scatter_add
 import torch_sparse

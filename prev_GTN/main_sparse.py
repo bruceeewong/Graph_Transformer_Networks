@@ -7,14 +7,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from model_sparse import GTN
 import pdb
-from torch_geometric.utils import dense_to_sparse, f1_score, accuracy
-from torch_geometric.data import Data
 import torch_sparse
 import pickle
 from scipy.sparse import csr_matrix
 import scipy.sparse as sp
 import argparse
-from utils import extract_attention_weights, save_attention_weights
+from utils import f1_score, accuracy, extract_attention_weights, save_attention_weights
 
 
 def setup_logger(output_path, timestamp):
