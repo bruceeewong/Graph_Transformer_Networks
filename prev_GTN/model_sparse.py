@@ -5,13 +5,46 @@ import torch.nn.functional as F
 import math
 from matplotlib import pyplot as plt
 import pdb
-from torch_geometric.utils import dense_to_sparse
 from gcn import GCNConv
 from torch_scatter import scatter_add
 import torch_sparse
-import torch_sparse_old
-from torch_geometric.utils.num_nodes import maybe_num_nodes
 from torch_geometric.utils import remove_self_loops, add_self_loops
+
+
+def spspmm(edge_index_a, value_a, edge_index_b, value_b, m, k, n):
+    """
+    Sparse-sparse matrix multiplication using native PyTorch.
+    Computes A @ B where A is (m x k) and B is (k x n).
+
+    Args:
+        edge_index_a: [2, nnz_a] edge indices for matrix A
+        value_a: [nnz_a] values for matrix A
+        edge_index_b: [2, nnz_b] edge indices for matrix B
+        value_b: [nnz_b] values for matrix B
+        m, k, n: matrix dimensions
+
+    Returns:
+        edge_index: [2, nnz] result edge indices
+        values: [nnz] result values
+    """
+    device = edge_index_a.device
+
+    # Create sparse tensors in COO format
+    A = torch.sparse_coo_tensor(
+        edge_index_a, value_a, (m, k), device=device
+    ).coalesce()
+    B = torch.sparse_coo_tensor(
+        edge_index_b, value_b, (k, n), device=device
+    ).coalesce()
+
+    # Perform sparse matrix multiplication
+    C = torch.sparse.mm(A, B).coalesce()
+
+    # Extract indices and values
+    edge_index = C.indices()
+    values = C.values()
+
+    return edge_index, values
 
 class GTN(nn.Module):
     
@@ -111,7 +144,7 @@ class GTLayer(nn.Module):
             a_edge, a_value = result_A[i]
             b_edge, b_value = result_B[i]
             
-            edges, values = torch_sparse_old.spspmm(a_edge, a_value, b_edge, b_value, self.num_nodes, self.num_nodes, self.num_nodes)
+            edges, values = spspmm(a_edge, a_value, b_edge, b_value, self.num_nodes, self.num_nodes, self.num_nodes)
             H.append((edges, values))
         return H, W
 
