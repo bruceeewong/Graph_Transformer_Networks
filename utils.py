@@ -558,7 +558,9 @@ def compute_metapath_scores(attn_data, edge_type_names, channel=0):
         List of dicts with keys:
             - 'path_indices': tuple of edge type indices
             - 'path_name': string representation (e.g., 'PA -> AP')
+            - 'effective_path': path name with Identity edges removed (e.g., 'AP' for 'I + AP')
             - 'score': product of attention scores
+            - 'length': effective path length (excluding Identity)
     """
     import itertools
 
@@ -567,7 +569,7 @@ def compute_metapath_scores(attn_data, edge_type_names, channel=0):
     num_q_matrices = len(weights)
 
     # Generate all possible meta-paths (combinations of edge types across Q matrices)
-    all_paths = list[tuple[int, ...]](itertools.product(range(num_edge_types), repeat=num_q_matrices))
+    all_paths = list(itertools.product(range(num_edge_types), repeat=num_q_matrices))
 
     results = []
     for path in all_paths:
@@ -580,24 +582,45 @@ def compute_metapath_scores(attn_data, edge_type_names, channel=0):
         # e.g., ('PA', 'AP') -> 'PAP' (removing duplicate middle letters)
         path_names = [edge_type_names[i] for i in path]
 
-        # Concatenate: PA + AP -> PAP, PA + AP + PS -> PAPS
+        # Build full path name (including I)
         if len(path_names) == 1:
             full_path_name = path_names[0]
         else:
-            # Start with first edge type
             full_path_name = path_names[0]
             for i in range(1, len(path_names)):
-                # Check if last char of current matches first char of next
                 if full_path_name[-1] == path_names[i][0]:
                     full_path_name += path_names[i][1:]
                 else:
-                    # Disconnected path, use arrow notation
                     full_path_name += ' -> ' + path_names[i]
+
+        # Build effective path name (excluding Identity 'I')
+        # Identity matrix doesn't add hops: I × A = A, A × I = A
+        non_identity_names = [name for name in path_names if name != 'I']
+
+        if len(non_identity_names) == 0:
+            # All Identity: pure self-loop
+            effective_path = 'I'
+            effective_length = 0
+        elif len(non_identity_names) == 1:
+            effective_path = non_identity_names[0]
+            effective_length = 1
+        else:
+            # Concatenate non-identity edges
+            effective_path = non_identity_names[0]
+            for i in range(1, len(non_identity_names)):
+                if effective_path[-1] == non_identity_names[i][0]:
+                    effective_path += non_identity_names[i][1:]
+                else:
+                    # Disconnected after removing I
+                    effective_path += ' -> ' + non_identity_names[i]
+            effective_length = len(non_identity_names)
 
         results.append({
             'path_indices': path,
             'path_name': full_path_name,
-            'score': score
+            'effective_path': effective_path,
+            'score': score,
+            'length': effective_length
         })
 
     # Sort by score descending
@@ -606,7 +629,7 @@ def compute_metapath_scores(attn_data, edge_type_names, channel=0):
 
 
 def get_top_metapaths(attn_data, dataset, top_k=3, between_target_only=False,
-                      connected_only=True, channel=0):
+                      connected_only=True, channel=0, use_effective_path=True):
     """
     Get top-k meta-paths ranked by attention score for a single channel.
 
@@ -620,17 +643,18 @@ def get_top_metapaths(attn_data, dataset, top_k=3, between_target_only=False,
                        end node matches the next edge's start node (default: True).
                        E.g., "PAP" is connected (P→A→P), "PA -> PA" is disconnected.
         channel: Which channel to analyze (default: 0)
+        use_effective_path: If True, use effective_path (with Identity removed) for
+                           filtering and aggregation. This allows shorter paths like
+                           "AP" (from I+AP or AP+I) to appear. (default: True)
 
     Returns:
-        List of top-k meta-path dicts with 'path_name' and 'score'
+        List of top-k meta-path dicts with 'path_name', 'effective_path', 'score', 'length'
 
     Example:
         For IMDB with between_target_only=True:
-            Returns paths like MDM, MAM, MDMDM (Movie -> ... -> Movie)
+            Returns paths like MDM, MAM, M (with varying lengths)
         For IMDB with between_target_only=False, connected_only=True:
-            Returns paths like DM, AM, MDM (any connected path)
-        For IMDB with connected_only=False:
-            Returns all paths including disconnected ones like "MD -> MD"
+            Returns paths like DM, AM, MDM, M (any connected path, any length)
     """
     edge_type_names = get_edge_type_names(dataset)
     if edge_type_names is None:
@@ -641,20 +665,44 @@ def get_top_metapaths(attn_data, dataset, top_k=3, between_target_only=False,
     # Compute all meta-path scores for this channel
     all_paths = compute_metapath_scores(attn_data, edge_type_names, channel=channel)
 
-    # Filter for connected paths (no ' -> ' in path name means edges are connected)
+    # Choose which path representation to use for filtering
+    path_key = 'effective_path' if use_effective_path else 'path_name'
+
+    # Filter for connected paths (no ' -> ' means edges are connected)
     if connected_only:
-        all_paths = [p for p in all_paths if ' -> ' not in p['path_name']]
+        all_paths = [p for p in all_paths if ' -> ' not in p[path_key]]
 
     # Filter for paths between target nodes
     if between_target_only and target_type:
         all_paths = [p for p in all_paths
-                    if p['path_name'][0] == target_type and p['path_name'][-1] == target_type]
+                    if len(p[path_key]) > 0
+                    and p[path_key][0] == target_type
+                    and p[path_key][-1] == target_type]
+
+    # Aggregate paths with the same effective representation
+    # Multiple raw paths can have the same effective path (e.g., I+AP and AP+I both give "AP")
+    if use_effective_path:
+        aggregated = {}
+        for p in all_paths:
+            eff = p['effective_path']
+            if eff not in aggregated:
+                aggregated[eff] = {
+                    'path_name': eff,
+                    'effective_path': eff,
+                    'score': 0.0,
+                    'length': p['length'],
+                    'raw_paths': []
+                }
+            aggregated[eff]['score'] += p['score']
+            aggregated[eff]['raw_paths'].append(p)
+
+        all_paths = sorted(aggregated.values(), key=lambda x: x['score'], reverse=True)
 
     return all_paths[:top_k]
 
 
 def get_top_metapaths_all_channels(attn_data, dataset, top_k=3, between_target_only=False,
-                                   connected_only=True):
+                                   connected_only=True, use_effective_path=True):
     """
     Get top-k meta-paths across all channels.
 
@@ -667,6 +715,7 @@ def get_top_metapaths_all_channels(attn_data, dataset, top_k=3, between_target_o
         top_k: Number of top meta-paths to return per channel (default: 3)
         between_target_only: If True, only return meta-paths between target nodes
         connected_only: If True, only return connected meta-paths (default: True)
+        use_effective_path: If True, use effective paths with Identity removed (default: True)
 
     Returns:
         dict with keys:
@@ -674,41 +723,34 @@ def get_top_metapaths_all_channels(attn_data, dataset, top_k=3, between_target_o
             - 'aggregated': top-k paths by max score across channels
     """
     num_channels = attn_data['num_channels']
-    edge_type_names = get_edge_type_names(dataset)
 
-    # Get top paths per channel
+    # Get top paths per channel (already aggregated by effective path)
     per_channel = []
     for ch in range(num_channels):
         top_paths = get_top_metapaths(
             attn_data, dataset, top_k=top_k,
             between_target_only=between_target_only,
-            connected_only=connected_only, channel=ch
+            connected_only=connected_only, channel=ch,
+            use_effective_path=use_effective_path
         )
         per_channel.append({
             'channel': ch,
             'top_paths': top_paths
         })
 
-    # Aggregate: collect all paths with their max score across channels
+    # Aggregate across channels: collect paths with their max score
     all_path_scores = {}
-    for ch in range(num_channels):
-        all_paths = compute_metapath_scores(attn_data, edge_type_names, channel=ch)
-
-        # Filter for connected paths
-        if connected_only:
-            all_paths = [p for p in all_paths if ' -> ' not in p['path_name']]
-
-        # Filter for paths between target nodes
-        if between_target_only:
-            target_type = get_target_node_type(dataset)
-            all_paths = [p for p in all_paths
-                        if p['path_name'][0] == target_type
-                        and p['path_name'][-1] == target_type]
-
-        for path in all_paths:
-            name = path['path_name']
+    for ch_data in per_channel:
+        ch = ch_data['channel']
+        for path in ch_data['top_paths']:
+            name = path['effective_path'] if use_effective_path else path['path_name']
             if name not in all_path_scores:
-                all_path_scores[name] = {'path_name': name, 'max_score': 0, 'channel_scores': {}}
+                all_path_scores[name] = {
+                    'path_name': name,
+                    'max_score': 0,
+                    'channel_scores': {},
+                    'length': path.get('length', len(name) // 2)
+                }
             all_path_scores[name]['channel_scores'][ch] = path['score']
             all_path_scores[name]['max_score'] = max(all_path_scores[name]['max_score'], path['score'])
 
@@ -721,7 +763,7 @@ def get_top_metapaths_all_channels(attn_data, dataset, top_k=3, between_target_o
     }
 
 
-def print_top_metapaths(attn_data, dataset, top_k=3, connected_only=True):
+def print_top_metapaths(attn_data, dataset, top_k=3, connected_only=True, use_effective_path=True):
     """
     Print top meta-paths in a formatted table, similar to GTN paper Table 1.
 
@@ -733,6 +775,8 @@ def print_top_metapaths(attn_data, dataset, top_k=3, connected_only=True):
         attn_data: dict from extract_attention_weights()
         dataset: Dataset name ('DBLP', 'ACM', 'IMDB')
         top_k: Number of top meta-paths to show (default: 3)
+        connected_only: If True, only show connected paths (default: True)
+        use_effective_path: If True, aggregate by effective path (Identity removed) (default: True)
     """
     num_channels = attn_data['num_channels']
 
@@ -753,14 +797,16 @@ def print_top_metapaths(attn_data, dataset, top_k=3, connected_only=True):
 
         # Top k between target nodes
         top_between = get_top_metapaths(attn_data, dataset, top_k=top_k,
-                                        between_target_only=True, connected_only=connected_only, channel=ch)
-        between_str = ", ".join([f"{p['path_name']} ({p['score']:.4f})" for p in top_between])
+                                        between_target_only=True, connected_only=connected_only,
+                                        channel=ch, use_effective_path=use_effective_path)
+        between_str = ", ".join([f"{p['effective_path']} ({p['score']:.4f})" for p in top_between])
         print(f"Top {top_k} (between target nodes): {between_str}")
 
         # Top k all
         top_all = get_top_metapaths(attn_data, dataset, top_k=top_k,
-                                    between_target_only=False, connected_only=connected_only, channel=ch)
-        all_str = ", ".join([f"{p['path_name']} ({p['score']:.4f})" for p in top_all])
+                                    between_target_only=False, connected_only=connected_only,
+                                    channel=ch, use_effective_path=use_effective_path)
+        all_str = ", ".join([f"{p['effective_path']} ({p['score']:.4f})" for p in top_all])
         print(f"Top {top_k} (all):                   {all_str}")
 
     print("\n" + "="*70)
