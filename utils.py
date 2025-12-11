@@ -521,3 +521,246 @@ def print_attention_weights(attn_data, edge_type_names=None):
             print(row)
 
     print("\n" + "="*60)
+
+
+def get_target_node_type(dataset):
+    """
+    Get the target node type for classification in each dataset.
+
+    Args:
+        dataset: Dataset name ('DBLP', 'ACM', 'IMDB')
+
+    Returns:
+        Target node type character (e.g., 'P' for Paper, 'M' for Movie)
+    """
+    target_types = {
+        'DBLP': 'P',   # Paper classification
+        'ACM': 'P',    # Paper classification
+        'IMDB': 'M',   # Movie classification
+    }
+    return target_types.get(dataset, None)
+
+
+def compute_metapath_scores(attn_data, edge_type_names, channel=0):
+    """
+    Compute meta-path importance scores for a single channel by multiplying
+    attention scores across Q matrices.
+
+    Based on GTN paper Equation 8:
+    contribution(t_l, ..., t_0) = prod_{i=0}^{l} alpha_{t_i}^{(i)}
+
+    Args:
+        attn_data: dict from extract_attention_weights()
+        edge_type_names: List of edge type names (e.g., ['PA', 'AP', 'PS', 'SP', 'I'])
+        channel: Which channel to compute scores for (default: 0)
+
+    Returns:
+        List of dicts with keys:
+            - 'path_indices': tuple of edge type indices
+            - 'path_name': string representation (e.g., 'PA -> AP')
+            - 'score': product of attention scores
+    """
+    import itertools
+
+    weights = attn_data['weights']
+    num_edge_types = attn_data['num_edge_types']
+    num_q_matrices = len(weights)
+
+    # Generate all possible meta-paths (combinations of edge types across Q matrices)
+    all_paths = list[tuple[int, ...]](itertools.product(range(num_edge_types), repeat=num_q_matrices))
+
+    results = []
+    for path in all_paths:
+        # Multiply attention scores across Q matrices for this channel
+        score = 1.0
+        for q_idx, edge_idx in enumerate(path):
+            score *= weights[q_idx][channel, edge_idx]
+
+        # Build path name by concatenating edge type names
+        # e.g., ('PA', 'AP') -> 'PAP' (removing duplicate middle letters)
+        path_names = [edge_type_names[i] for i in path]
+
+        # Concatenate: PA + AP -> PAP, PA + AP + PS -> PAPS
+        if len(path_names) == 1:
+            full_path_name = path_names[0]
+        else:
+            # Start with first edge type
+            full_path_name = path_names[0]
+            for i in range(1, len(path_names)):
+                # Check if last char of current matches first char of next
+                if full_path_name[-1] == path_names[i][0]:
+                    full_path_name += path_names[i][1:]
+                else:
+                    # Disconnected path, use arrow notation
+                    full_path_name += ' -> ' + path_names[i]
+
+        results.append({
+            'path_indices': path,
+            'path_name': full_path_name,
+            'score': score
+        })
+
+    # Sort by score descending
+    results.sort(key=lambda x: x['score'], reverse=True)
+    return results
+
+
+def get_top_metapaths(attn_data, dataset, top_k=3, between_target_only=False,
+                      connected_only=True, channel=0):
+    """
+    Get top-k meta-paths ranked by attention score for a single channel.
+
+    Args:
+        attn_data: dict from extract_attention_weights()
+        dataset: Dataset name ('DBLP', 'ACM', 'IMDB')
+        top_k: Number of top meta-paths to return (default: 3)
+        between_target_only: If True, only return meta-paths that start and end
+                            with the target node type (default: False)
+        connected_only: If True, only return connected meta-paths where each edge's
+                       end node matches the next edge's start node (default: True).
+                       E.g., "PAP" is connected (P→A→P), "PA -> PA" is disconnected.
+        channel: Which channel to analyze (default: 0)
+
+    Returns:
+        List of top-k meta-path dicts with 'path_name' and 'score'
+
+    Example:
+        For IMDB with between_target_only=True:
+            Returns paths like MDM, MAM, MDMDM (Movie -> ... -> Movie)
+        For IMDB with between_target_only=False, connected_only=True:
+            Returns paths like DM, AM, MDM (any connected path)
+        For IMDB with connected_only=False:
+            Returns all paths including disconnected ones like "MD -> MD"
+    """
+    edge_type_names = get_edge_type_names(dataset)
+    if edge_type_names is None:
+        raise ValueError(f"Unknown dataset: {dataset}")
+
+    target_type = get_target_node_type(dataset)
+
+    # Compute all meta-path scores for this channel
+    all_paths = compute_metapath_scores(attn_data, edge_type_names, channel=channel)
+
+    # Filter for connected paths (no ' -> ' in path name means edges are connected)
+    if connected_only:
+        all_paths = [p for p in all_paths if ' -> ' not in p['path_name']]
+
+    # Filter for paths between target nodes
+    if between_target_only and target_type:
+        all_paths = [p for p in all_paths
+                    if p['path_name'][0] == target_type and p['path_name'][-1] == target_type]
+
+    return all_paths[:top_k]
+
+
+def get_top_metapaths_all_channels(attn_data, dataset, top_k=3, between_target_only=False,
+                                   connected_only=True):
+    """
+    Get top-k meta-paths across all channels.
+
+    For each channel, computes meta-path scores and returns the top paths.
+    Also provides an aggregated view across channels.
+
+    Args:
+        attn_data: dict from extract_attention_weights()
+        dataset: Dataset name ('DBLP', 'ACM', 'IMDB')
+        top_k: Number of top meta-paths to return per channel (default: 3)
+        between_target_only: If True, only return meta-paths between target nodes
+        connected_only: If True, only return connected meta-paths (default: True)
+
+    Returns:
+        dict with keys:
+            - 'per_channel': list of top-k paths for each channel
+            - 'aggregated': top-k paths by max score across channels
+    """
+    num_channels = attn_data['num_channels']
+    edge_type_names = get_edge_type_names(dataset)
+
+    # Get top paths per channel
+    per_channel = []
+    for ch in range(num_channels):
+        top_paths = get_top_metapaths(
+            attn_data, dataset, top_k=top_k,
+            between_target_only=between_target_only,
+            connected_only=connected_only, channel=ch
+        )
+        per_channel.append({
+            'channel': ch,
+            'top_paths': top_paths
+        })
+
+    # Aggregate: collect all paths with their max score across channels
+    all_path_scores = {}
+    for ch in range(num_channels):
+        all_paths = compute_metapath_scores(attn_data, edge_type_names, channel=ch)
+
+        # Filter for connected paths
+        if connected_only:
+            all_paths = [p for p in all_paths if ' -> ' not in p['path_name']]
+
+        # Filter for paths between target nodes
+        if between_target_only:
+            target_type = get_target_node_type(dataset)
+            all_paths = [p for p in all_paths
+                        if p['path_name'][0] == target_type
+                        and p['path_name'][-1] == target_type]
+
+        for path in all_paths:
+            name = path['path_name']
+            if name not in all_path_scores:
+                all_path_scores[name] = {'path_name': name, 'max_score': 0, 'channel_scores': {}}
+            all_path_scores[name]['channel_scores'][ch] = path['score']
+            all_path_scores[name]['max_score'] = max(all_path_scores[name]['max_score'], path['score'])
+
+    # Sort by max score and get top-k
+    aggregated = sorted(all_path_scores.values(), key=lambda x: x['max_score'], reverse=True)[:top_k]
+
+    return {
+        'per_channel': per_channel,
+        'aggregated': aggregated
+    }
+
+
+def print_top_metapaths(attn_data, dataset, top_k=3, connected_only=True):
+    """
+    Print top meta-paths in a formatted table, similar to GTN paper Table 1.
+
+    Shows:
+        - Top k (between target nodes): Meta-paths that start and end with target type
+        - Top k (all): All meta-paths regardless of start/end node type
+
+    Args:
+        attn_data: dict from extract_attention_weights()
+        dataset: Dataset name ('DBLP', 'ACM', 'IMDB')
+        top_k: Number of top meta-paths to show (default: 3)
+    """
+    num_channels = attn_data['num_channels']
+
+    print("\n" + "="*70)
+    print(f"Top Meta-Paths Learned by GTN for {dataset}")
+    print("="*70)
+
+    # Get predefined meta-paths for reference
+    predefined = {
+        'DBLP': 'APCPA, APA',
+        'ACM': 'PAP, PSP',
+        'IMDB': 'MAM, MDM'
+    }
+    print(f"\nPredefined meta-paths: {predefined.get(dataset, 'N/A')}")
+
+    for ch in range(num_channels):
+        print(f"\n--- Channel {ch} ---")
+
+        # Top k between target nodes
+        top_between = get_top_metapaths(attn_data, dataset, top_k=top_k,
+                                        between_target_only=True, connected_only=connected_only, channel=ch)
+        between_str = ", ".join([f"{p['path_name']} ({p['score']:.4f})" for p in top_between])
+        print(f"Top {top_k} (between target nodes): {between_str}")
+
+        # Top k all
+        top_all = get_top_metapaths(attn_data, dataset, top_k=top_k,
+                                    between_target_only=False, connected_only=connected_only, channel=ch)
+        all_str = ", ".join([f"{p['path_name']} ({p['score']:.4f})" for p in top_all])
+        print(f"Top {top_k} (all):                   {all_str}")
+
+    print("\n" + "="*70)
